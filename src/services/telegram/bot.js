@@ -3,12 +3,14 @@ const User = require('../../models/User');
 const DailyReport = require('../../models/DailyReport');
 const ReportParser = require('../report/parser');
 const OpenAIAnalyzer = require('../openai/analyzer');
+const FatSecretAnalyzer = require('../fatsecret/analyzer');
 const logger = require('../../utils/logger');
 
 class TelegramBotService {
-  constructor(token, openaiApiKey) {
+  constructor(token, openaiApiKey, fatSecretKey, fatSecretSecret) {
     this.bot = new TelegramBot(token, { polling: true });
     this.openaiAnalyzer = new OpenAIAnalyzer(openaiApiKey);
+    this.fatSecretAnalyzer = new FatSecretAnalyzer(fatSecretKey, fatSecretSecret);
     this.reportParser = new ReportParser();
     this.setupCommands();
     this.setupMessageHandlers();
@@ -18,6 +20,7 @@ class TelegramBotService {
     this.bot.setMyCommands([
       { command: 'start', description: 'Почати роботу з ботом' },
       { command: 'report', description: 'Заповнити щоденний звіт' },
+      { command: 'fatsecret', description: 'Імпорт даних з FatSecret' },
       { command: 'stats', description: 'Переглянути статистику' },
       { command: 'settings', description: 'Налаштування' },
       { command: 'help', description: 'Довідка' }
@@ -110,6 +113,9 @@ class TelegramBotService {
           return;
         }
         await this.handleCommentsInput(msg, user);
+        break;
+      case 'waiting_for_fatsecret_action':
+        await this.handleFatSecretAction(msg, user);
         break;
       default:
         await this.bot.sendMessage(chatId, 'Будь ласка, використовуйте команди для взаємодії з ботом');
@@ -213,30 +219,386 @@ class TelegramBotService {
     const chatId = msg.chat.id;
     const text = msg.text;
     logger.info(`[STEP] User ${user.username} (${user.telegramId}) entered calories: ${text}`);
+    
     try {
-      const calories = parseInt(text);
-      if (isNaN(calories) || calories < 0) {
-        await this.bot.sendMessage(chatId, 'Будь ласка, введіть коректну кількість калорій (ціле число)');
+      // Check if user wants to import from FatSecret
+      if (text === '📱 Імпорт з FatSecret') {
+        await this.importFromFatSecret(chatId, user);
         return;
       }
-      user.updateInputState('waiting_for_training', { calories });
-      await user.save();
-      logger.info(`[STEP] User ${user.username} (${user.telegramId}) -> waiting_for_training`);
+      
+      // First, try to parse as a simple number
+      const simpleCalories = parseInt(text);
+      
+      if (!isNaN(simpleCalories) && simpleCalories > 0 && simpleCalories <= 10000) {
+        // Simple calorie input
+        const nutrition = {
+          calories: { value: simpleCalories, source: 'manual' }
+        };
+        user.updateInputState('waiting_for_training', { nutrition });
+        await user.save();
+        logger.info(`[STEP] User ${user.username} (${user.telegramId}) -> waiting_for_training`);
+        
+        const keyboard = {
+          reply_markup: {
+            keyboard: [
+              ['🏃 Біг', '🚴 Велосипед', '🏋️ Тренування'],
+              ['🏊 Плавання', '🚶 Ходьба', '⛹️ Інше'],
+              ['❌ Пропустити']
+            ],
+            resize_keyboard: true,
+            one_time_keyboard: true
+          }
+        };
+        await this.bot.sendMessage(chatId, 
+          `✅ Калорії: ${simpleCalories}\n\nВиберіть тип тренування або пропустіть цей крок:`, 
+          keyboard
+        );
+        return;
+      }
+      
+      // If not a simple number, try to parse as food description using FatSecret
+      if (text.length > 3) {
+        await this.bot.sendMessage(chatId, '🔍 Аналізую продукти харчування через FatSecret...');
+        
+        const nutritionResult = await this.fatSecretAnalyzer.parseManualFoodInput(text);
+        
+        if (nutritionResult.success) {
+          const nutrition = {
+            calories: { value: nutritionResult.data.calories, source: 'fatsecret' },
+            protein: nutritionResult.data.protein,
+            carbs: nutritionResult.data.carbs,
+            fat: nutritionResult.data.fat,
+            fiber: nutritionResult.data.fiber,
+            sugar: nutritionResult.data.sugar,
+            sodium: nutritionResult.data.sodium,
+            meals: nutritionResult.data.meals
+          };
+          
+          user.updateInputState('waiting_for_training', { nutrition });
+          await user.save();
+          logger.info(`[STEP] User ${user.username} (${user.telegramId}) -> waiting_for_training (FatSecret)`);
+          
+          // Format detailed nutrition message
+          const nutritionMessage = this.fatSecretAnalyzer.formatNutritionMessage(nutritionResult.data);
+          
+          const keyboard = {
+            reply_markup: {
+              keyboard: [
+                ['🏃 Біг', '🚴 Велосипед', '🏋️ Тренування'],
+                ['🏊 Плавання', '🚶 Ходьба', '⛹️ Інше'],
+                ['❌ Пропустити']
+              ],
+              resize_keyboard: true,
+              one_time_keyboard: true
+            }
+          };
+          
+          await this.bot.sendMessage(chatId, 
+            `${nutritionMessage}\n\nВиберіть тип тренування або пропустіть цей крок:`, 
+            keyboard
+          );
+          return;
+        } else {
+          // FatSecret parsing failed, ask for clarification
+          await this.bot.sendMessage(chatId, 
+            `❌ ${nutritionResult.error}\n\n` +
+            'Ви можете ввести:\n' +
+            '• Просто число калорій (наприклад: 2000)\n' +
+            '• Список продуктів (наприклад: "2 яблука, 200г курка, 1 склянка рису")\n' +
+            '• Або використати кнопку "📱 Імпорт з FatSecret"\n\n' +
+            'Спробуйте ще раз:'
+          );
+          return;
+        }
+      }
+      
+      // Invalid input
       const keyboard = {
         reply_markup: {
           keyboard: [
-            ['🏃 Біг', '🚴 Велосипед', '🏋️ Тренування'],
-            ['🏊 Плавання', '🚶 Ходьба', '⛹️ Інше'],
+            ['📱 Імпорт з FatSecret'],
             ['❌ Пропустити']
           ],
           resize_keyboard: true,
           one_time_keyboard: true
         }
       };
-      await this.bot.sendMessage(chatId, 'Виберіть тип тренування або пропустіть цей крок:', keyboard);
+      
+      await this.bot.sendMessage(chatId, 
+        'Будь ласка, введіть:\n' +
+        '• Кількість калорій (число від 1 до 10000)\n' +
+        '• Або опишіть що ви їли (наприклад: "2 яблука, салат, 200г курка")\n' +
+        '• Або використайте кнопку нижче для імпорту з FatSecret',
+        keyboard
+      );
+      
     } catch (error) {
       logger.error('Error handling calories input:', error);
       await this.sendError(chatId, 'Помилка при обробці калорій');
+    }
+  }
+
+  async importFromFatSecret(chatId, user) {
+    try {
+      await this.bot.sendMessage(chatId, '🔍 Імпортую дані з FatSecret...');
+      
+      // Use user's Telegram ID as FatSecret profile ID
+      const userId = user.telegramId;
+      const today = new Date();
+      
+      const nutritionResult = await this.fatSecretAnalyzer.getNutritionFromDiary(userId, today);
+      
+      if (nutritionResult.success) {
+        const nutrition = {
+          calories: { value: nutritionResult.data.calories, source: 'fatsecret' },
+          protein: nutritionResult.data.protein,
+          carbs: nutritionResult.data.carbs,
+          fat: nutritionResult.data.fat,
+          fiber: nutritionResult.data.fiber,
+          sugar: nutritionResult.data.sugar,
+          sodium: nutritionResult.data.sodium,
+          meals: nutritionResult.data.meals
+        };
+        
+        user.updateInputState('waiting_for_training', { nutrition });
+        
+        // Update user's FatSecret integration status
+        if (!user.integrations.fatSecret.enabled) {
+          user.integrations.fatSecret.enabled = true;
+          user.integrations.fatSecret.profileId = userId;
+          user.integrations.fatSecret.lastSync = new Date();
+        }
+        
+        await user.save();
+        logger.info(`[STEP] User ${user.username} (${user.telegramId}) -> waiting_for_training (FatSecret Import)`);
+        
+        // Format detailed nutrition message
+        const nutritionMessage = this.fatSecretAnalyzer.formatDiaryByMeals(nutritionResult.data);
+        
+        const keyboard = {
+          reply_markup: {
+            keyboard: [
+              ['🏃 Біг', '🚴 Велосипед', '🏋️ Тренування'],
+              ['🏊 Плавання', '🚶 Ходьба', '⛹️ Інше'],
+              ['❌ Пропустити']
+            ],
+            resize_keyboard: true,
+            one_time_keyboard: true
+          }
+        };
+        
+        await this.bot.sendMessage(chatId, 
+          `${nutritionMessage}\nВиберіть тип тренування або пропустіть цей крок:`, 
+          keyboard
+        );
+      } else {
+        await this.bot.sendMessage(chatId, 
+          `❌ ${nutritionResult.error}\n\n` +
+          'Переконайтеся, що ви додали продукти в FatSecret додаток на сьогодні.\n\n' +
+          'Ви можете ввести дані вручну:'
+        );
+      }
+    } catch (error) {
+      logger.error('Error importing from FatSecret:', error);
+      await this.sendError(chatId, 'Помилка при імпорті з FatSecret');
+    }
+  }
+
+  async handleFatSecret(msg, user) {
+    const chatId = msg.chat.id;
+    
+    try {
+      const keyboard = {
+        reply_markup: {
+          keyboard: [
+            ['📅 Сьогодні', '📅 Вчора'],
+            ['📊 Цей тиждень', '📊 Цей місяць'],
+            ['⚙️ Налаштування', '❌ Закрити']
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: true
+        }
+      };
+      
+      await this.bot.sendMessage(chatId, 
+        '📱 FatSecret Інтеграція\n\n' +
+        'Виберіть період для імпорту даних з вашого FatSecret щоденника:',
+        keyboard
+      );
+      
+      // Set user state to handle FatSecret commands
+      user.updateInputState('waiting_for_fatsecret_action');
+      await user.save();
+      
+    } catch (error) {
+      logger.error('Error handling FatSecret command:', error);
+      await this.sendError(chatId, 'Помилка при обробці команди FatSecret');
+    }
+  }
+
+  async handleFatSecretAction(msg, user) {
+    const chatId = msg.chat.id;
+    const text = msg.text;
+    
+    try {
+      // Reset user state
+      user.updateInputState('idle');
+      await user.save();
+      
+      const userId = user.telegramId;
+      
+      switch (text) {
+        case '📅 Сьогодні':
+          await this.importFatSecretDay(chatId, userId, new Date());
+          break;
+        case '📅 Вчора':
+          const yesterday = new Date();
+          yesterday.setDate(yesterday.getDate() - 1);
+          await this.importFatSecretDay(chatId, userId, yesterday);
+          break;
+        case '📊 Цей тиждень':
+          await this.importFatSecretWeek(chatId, userId);
+          break;
+        case '📊 Цей місяць':
+          const now = new Date();
+          await this.importFatSecretMonth(chatId, userId, now.getFullYear(), now.getMonth() + 1);
+          break;
+        case '⚙️ Налаштування':
+          await this.showFatSecretSettings(chatId, user);
+          break;
+        case '❌ Закрити':
+          await this.bot.sendMessage(chatId, 'FatSecret меню закрито.', {
+            reply_markup: { remove_keyboard: true }
+          });
+          break;
+        default:
+          await this.bot.sendMessage(chatId, 'Невідома дія. Використовуйте /fatsecret для відкриття меню.');
+      }
+    } catch (error) {
+      logger.error('Error handling FatSecret action:', error);
+      await this.sendError(chatId, 'Помилка при обробці FatSecret дії');
+    }
+  }
+
+  async importFatSecretDay(chatId, userId, date) {
+    try {
+      await this.bot.sendMessage(chatId, `🔍 Імпортую дані з FatSecret за ${date.toLocaleDateString('uk-UA')}...`);
+      
+      const nutritionResult = await this.fatSecretAnalyzer.getNutritionFromDiary(userId, date);
+      
+      if (nutritionResult.success) {
+        const nutritionMessage = this.fatSecretAnalyzer.formatDiaryByMeals(nutritionResult.data);
+        await this.bot.sendMessage(chatId, nutritionMessage);
+      } else {
+        await this.bot.sendMessage(chatId, 
+          `❌ ${nutritionResult.error}\n\n` +
+          'Переконайтеся, що ви додали продукти в FatSecret додаток на цю дату.'
+        );
+      }
+    } catch (error) {
+      logger.error('Error importing FatSecret day:', error);
+      await this.sendError(chatId, 'Помилка при імпорті денних даних');
+    }
+  }
+
+  async importFatSecretWeek(chatId, userId) {
+    try {
+      await this.bot.sendMessage(chatId, '🔍 Імпортую дані з FatSecret за тиждень...');
+      
+      const today = new Date();
+      const weekData = [];
+      
+      // Get data for the last 7 days
+      for (let i = 0; i < 7; i++) {
+        const date = new Date(today);
+        date.setDate(date.getDate() - i);
+        
+        const nutritionResult = await this.fatSecretAnalyzer.getNutritionFromDiary(userId, date);
+        if (nutritionResult.success) {
+          weekData.push({
+            date: date,
+            nutrition: nutritionResult.data
+          });
+        }
+      }
+      
+      if (weekData.length === 0) {
+        await this.bot.sendMessage(chatId, 'Немає даних у FatSecret за останній тиждень.');
+        return;
+      }
+      
+      // Format week summary
+      let message = '📊 Тижневий звіт з FatSecret:\n\n';
+      let totalCalories = 0;
+      let totalProtein = 0;
+      let totalCarbs = 0;
+      let totalFat = 0;
+      
+      weekData.forEach(day => {
+        const dateStr = day.date.toLocaleDateString('uk-UA', { weekday: 'short', day: 'numeric', month: 'short' });
+        message += `${dateStr}: ${Math.round(day.nutrition.calories)} ккал\n`;
+        totalCalories += day.nutrition.calories;
+        totalProtein += day.nutrition.protein;
+        totalCarbs += day.nutrition.carbs;
+        totalFat += day.nutrition.fat;
+      });
+      
+      const avgCalories = totalCalories / weekData.length;
+      message += `\n📈 Середнє за день: ${Math.round(avgCalories)} ккал\n`;
+      message += `🥩 Білки: ${Math.round(totalProtein / weekData.length)}г\n`;
+      message += `🍞 Вуглеводи: ${Math.round(totalCarbs / weekData.length)}г\n`;
+      message += `🧈 Жири: ${Math.round(totalFat / weekData.length)}г`;
+      
+      await this.bot.sendMessage(chatId, message);
+    } catch (error) {
+      logger.error('Error importing FatSecret week:', error);
+      await this.sendError(chatId, 'Помилка при імпорті тижневих даних');
+    }
+  }
+
+  async importFatSecretMonth(chatId, userId, year, month) {
+    try {
+      await this.bot.sendMessage(chatId, `🔍 Імпортую дані з FatSecret за ${month}/${year}...`);
+      
+      const monthResult = await this.fatSecretAnalyzer.getNutritionFromDiaryMonth(userId, year, month);
+      
+      if (monthResult.success && monthResult.data.length > 0) {
+        // Process month data (this would need more complex processing)
+        await this.bot.sendMessage(chatId, 
+          `📊 Знайдено ${monthResult.data.length} записів за ${month}/${year}\n\n` +
+          'Детальний аналіз місячних даних буде додано в наступних оновленнях.'
+        );
+      } else {
+        await this.bot.sendMessage(chatId, 
+          `❌ Немає даних у FatSecret за ${month}/${year}`
+        );
+      }
+    } catch (error) {
+      logger.error('Error importing FatSecret month:', error);
+      await this.sendError(chatId, 'Помилка при імпорті місячних даних');
+    }
+  }
+
+  async showFatSecretSettings(chatId, user) {
+    try {
+      const isEnabled = user.integrations.fatSecret.enabled;
+      const lastSync = user.integrations.fatSecret.lastSync;
+      
+      let message = '⚙️ Налаштування FatSecret:\n\n';
+      message += `Статус: ${isEnabled ? '✅ Увімкнено' : '❌ Вимкнено'}\n`;
+      
+      if (lastSync) {
+        message += `Остання синхронізація: ${lastSync.toLocaleString('uk-UA')}\n`;
+      }
+      
+      message += '\nℹ️ FatSecret інтеграція дозволяє імпортувати дані з вашого щоденника харчування.\n';
+      message += 'Переконайтеся, що ви ведете щоденник у FatSecret додатку.';
+      
+      await this.bot.sendMessage(chatId, message);
+    } catch (error) {
+      logger.error('Error showing FatSecret settings:', error);
+      await this.sendError(chatId, 'Помилка при відображенні налаштувань');
     }
   }
 
@@ -376,6 +738,9 @@ class TelegramBotService {
       case '/report':
         await this.startReportInput(chatId, user);
         break;
+      case '/fatsecret':
+        await this.handleFatSecret(msg, user);
+        break;
       case '/stats':
         await this.handleStats(msg, user);
         break;
@@ -437,6 +802,7 @@ class TelegramBotService {
       '*Доступні команди:*\n' +
       '• /start - Почати використання бота\n' +
       '• /report - Відправити щоденний звіт\n' +
+      '• /fatsecret - Імпорт даних з FatSecret\n' +
       '• /stats - Переглянути статистику\n' +
       '• /settings - Керувати налаштуваннями\n\n' +
       '*Інструкція щодо звіту:*\n' +

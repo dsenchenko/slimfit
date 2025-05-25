@@ -46,7 +46,8 @@ const userSchema = new mongoose.Schema({
         'waiting_for_calories',
         'waiting_for_training',
         'waiting_for_mood',
-        'waiting_for_comments'
+        'waiting_for_comments',
+        'waiting_for_fatsecret_action'
       ],
       default: 'idle'
     },
@@ -72,9 +73,10 @@ const userSchema = new mongoose.Schema({
         type: Boolean,
         default: false
       },
-      accessToken: String,
-      refreshToken: String,
-      tokenExpiresAt: Date
+      authToken: String,
+      authSecret: String,
+      profileId: String,
+      lastSync: Date
     }
   },
   createdAt: {

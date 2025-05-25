@@ -25,23 +25,58 @@ const dailyReportSchema = new mongoose.Schema({
     },
     source: {
       type: String,
-      enum: ['manual', 'garmin'],
+      enum: ['manual', 'garmin', 'screenshot'],
       default: 'manual'
-    }
+    },
+    bmi: Number,
+    bodyFat: Number, // percentage
+    muscleMass: Number, // kg
+    waterPercentage: Number // percentage
+  },
+  activity: {
+    steps: {
+      count: Number,
+      source: {
+        type: String,
+        enum: ['manual', 'garmin', 'screenshot'],
+        default: 'manual'
+      }
+    },
+    distance: Number, // km
+    caloriesBurned: Number,
+    activeMinutes: Number,
+    floorsClimbed: Number,
+    heartRateAvg: Number // bpm
   },
   nutrition: {
     calories: {
       value: Number,
       source: {
         type: String,
-        enum: ['manual', 'fatsecret', 'ocr'],
+        enum: ['manual', 'fatsecret', 'ocr', 'screenshot'],
         default: 'manual'
       }
     },
     protein: Number, // in grams
     carbs: Number,   // in grams
     fat: Number,     // in grams
+    fiber: Number,   // in grams
+    sugar: Number,   // in grams
+    sodium: Number,  // in mg
     water: Number,   // in ml
+    meals: [{
+      name: String,
+      brand: String,
+      serving: String,
+      quantity: Number,
+      calories: Number,
+      protein: Number,
+      carbs: Number,
+      fat: Number,
+      fiber: Number,
+      sugar: Number,
+      sodium: Number
+    }],
     notes: String
   },
   training: {
@@ -56,7 +91,7 @@ const dailyReportSchema = new mongoose.Schema({
     },
     source: {
       type: String,
-      enum: ['manual', 'garmin'],
+      enum: ['manual', 'garmin', 'screenshot'],
       default: 'manual'
     },
     description: String
@@ -70,16 +105,23 @@ const dailyReportSchema = new mongoose.Schema({
     description: String
   },
   sleep: {
-    duration: Number, // in minutes
+    duration: Number, // in hours
     quality: {
       type: String,
       enum: ['poor', 'fair', 'good', 'excellent']
     },
     source: {
       type: String,
-      enum: ['manual', 'garmin'],
+      enum: ['manual', 'garmin', 'screenshot'],
       default: 'manual'
-    }
+    },
+    deepSleep: Number, // hours
+    lightSleep: Number, // hours
+    remSleep: Number, // hours
+    awakeTime: Number, // hours
+    sleepScore: Number,
+    bedtime: String,
+    wakeTime: String
   },
   comments: String,
   aiFeedback: {

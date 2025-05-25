@@ -18,12 +18,14 @@ mongoose.connect(process.env.MONGODB_URI)
     process.exit(1);
   });
 
-// Initialize Telegram bot with OpenAI integration
+// Initialize Telegram bot with OpenAI and FatSecret integration
 const botService = new TelegramBotService(
   process.env.TELEGRAM_BOT_TOKEN,
-  process.env.OPENAI_API_KEY
+  process.env.OPENAI_API_KEY,
+  process.env.FATSECRET_CONSUMER_KEY || '569775a379394af89ba959db3b3029b4',
+  process.env.FATSECRET_CONSUMER_SECRET || '82e8a0aca935450595ecbdfd37a4e2e6'
 );
-logger.info('Telegram bot service initialized');
+logger.info('Telegram bot service initialized with FatSecret integration');
 
 // Basic error handling
 process.on('uncaughtException', (error) => {
